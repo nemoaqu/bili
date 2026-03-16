@@ -75,8 +75,30 @@ def fetch_dynamics(uid):
         return []
 
 
+def fetch_dynamic_detail(dyn_id):
+    """单独获取某条动态的完整详细数据，防止列表接口吞字截断"""
+    url = f"https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?id={dyn_id}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": f"https://t.bilibili.com/{dyn_id}",
+        "Origin": "https://t.bilibili.com"
+    }
+    if COOKIE:
+        headers["Cookie"] = COOKIE
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data['code'] == 0:
+                # 提取出完整无损的 item
+                return data.get('data', {}).get('item', {})
+    except Exception as e:
+        logging.error(f"❌ 获取完整动态详情失败: {e}")
+    return None
+
 def parse_item(item):
-    """解析单条动态的数据结构"""
+    """解析单条动态的数据结构（彻底解决 rich_text_nodes 提取问题，并支持图片）"""
     try:
         dyn_id = int(item.get('id_str', 0))
         modules = item.get('modules', {})
@@ -91,50 +113,101 @@ def parse_item(item):
         dynamic = modules.get('module_dynamic', {})
         desc = dynamic.get('desc') or {}
         major = dynamic.get('major') or {}
+        topic = dynamic.get('topic') or {}
 
-        text = ""
+        text_parts = []
+        pic_urls = []
 
-        # 提取常规纯文字
-        if isinstance(desc, dict) and desc.get('text'):
-            text += desc['text']
+        # ==========================================
+        # 🌟 核心修复：专门对付 rich_text_nodes 的提取函数
+        # ==========================================
+        def extract_text_from_node(content_node):
+            if not isinstance(content_node, dict):
+                return ""
+            extracted = ""
+            # 优先遍历 rich_text_nodes 获取完整无损文本
+            if 'rich_text_nodes' in content_node:
+                for node in content_node['rich_text_nodes']:
+                    # 优先取 orig_text，如果没有再取 text
+                    extracted += node.get('orig_text') or node.get('text') or ""
 
-        # 提取富媒体内容
+            # 如果 rich_text_nodes 不存在或为空，降级去外层拿 text 兜底
+            if not extracted and content_node.get('text'):
+                extracted = content_node['text']
+            return extracted.strip()
+
+        # ==========================================
+
+        # 1. 提取话题
+        if isinstance(topic, dict) and topic.get('name'):
+            text_parts.append(f"#{topic['name']}#")
+
+        # 2. 提取常规纯文字 (针对旧版动态 desc)
+        desc_text = extract_text_from_node(desc)
+        if desc_text:
+            text_parts.append(desc_text)
+
+        # 3. 提取富媒体内容 (针对新版 OPUS 动态)
         if isinstance(major, dict):
             major_type = major.get('type')
+
             if major_type == 'MAJOR_TYPE_OPUS':
-                summary = major.get('opus', {}).get('summary', {})
-                if summary.get('text') and summary['text'] not in text:
-                    text += " " + summary['text']
+                opus = major.get('opus', {})
+                if opus.get('title'):
+                    text_parts.append(f"【{opus['title']}】")
+
+                # 使用我们的核心函数从 summary 提取富文本
+                summary = opus.get('summary', {})
+                summary_text = extract_text_from_node(summary)
+
+                if summary_text and summary_text not in " ".join(text_parts):
+                    text_parts.append(summary_text)
+
+                # 提取图片
+                pics = opus.get('pics', [])
+                for pic in pics:
+                    if pic.get('url'):
+                        pic_urls.append(pic['url'])
+
             elif major_type == 'MAJOR_TYPE_ARCHIVE':
                 archive = major.get('archive', {})
-                text += f" 【发布了视频: {archive.get('title', '')}】"
+                text_parts.append(f"【发布了视频: {archive.get('title', '')}】")
+
             elif major_type == 'MAJOR_TYPE_ARTICLE':
                 article = major.get('article', {})
-                text += f" 【发布了专栏: {article.get('title', '')}】"
+                text_parts.append(f"【发布了专栏: {article.get('title', '')}】")
+
             elif major_type == 'MAJOR_TYPE_DRAW':
-                if not text.strip():
-                    pic_count = len(major.get('draw', {}).get('items', []))
-                    text += f" 【发布了 {pic_count} 张图片】"
+                draw_items = major.get('draw', {}).get('items', [])
+                for draw_item in draw_items:
+                    if draw_item.get('src'):
+                        pic_urls.append(draw_item['src'])
+
             elif major_type == 'MAJOR_TYPE_LIVE_RCMD':
-                text += " 【正在直播推送】"
+                text_parts.append("【正在直播推送】")
 
+        # 4. 提取转发信息
         if item.get('orig') or item.get('type') == 'DYNAMIC_TYPE_FORWARD':
-            text += " //【转发了动态】"
+            text_parts.append("//【转发了他人动态】")
 
-        if not text.strip():
-            text = "【该动态仅包含图片或无法识别的媒体内容】"
+        # 5. 排版并生成最终对象
+        text = "\n\n".join(text_parts).strip()
+        if not text:
+            text = "【该动态仅包含无法识别的媒体内容】"
 
         pub_time = datetime.fromtimestamp(pub_ts).strftime('%Y-%m-%d %H:%M:%S') if pub_ts > 0 else get_time()
 
         return {
             'id': dyn_id,
             'name': name,
-            'text': text.strip(),
+            'text': text,
+            'pics': pic_urls,
             'url': f"https://t.bilibili.com/{dyn_id}",
             'pub_time': pub_time
         }
     except Exception as e:
-        logging.error(f"❌ 解析出错: {e}")
+        import traceback
+        logging.error(f"❌ 解析出错: {e}\n{traceback.format_exc()}")
         return None
 
 
@@ -149,16 +222,36 @@ def generate_dingtalk_url():
 
 
 def push_notification(dyn):
-    """发送新动态推送"""
+    """发送带图片的钉钉推送"""
     logging.info(f"🔔 检测到新动态，准备推送: {dyn['url']}")
+
+    # 修复 Markdown 多行文本引用框断裂的问题
+    quoted_text = dyn['text'].replace('\n', '\n> ')
+
+    # 1. 组装文字部分
+    md_text = f"### 💡 {dyn['name']} 发新动态啦！\n\n**发布时间**：{dyn['pub_time']}\n\n**动态内容**：\n> {quoted_text}\n\n"
+
+    # 2. 组装图片部分
+    if dyn.get('pics'):
+        for pic_url in dyn['pics']:
+            md_text += f"![配图]({pic_url})\n\n"
+
+    # 3. 组装底部链接
+    md_text += f"[👉 点击这里直达动态]({dyn['url']})"
+
     payload = {
         "msgtype": "markdown",
         "markdown": {
             "title": f"B站动态更新: {dyn['name']}",
-            "text": f"### 💡 {dyn['name']} 发新动态啦！\n\n**发布时间**：{dyn['pub_time']}\n\n**动态内容**：\n> {dyn['text']}\n\n[👉 点击这里直达动态]({dyn['url']})"
+            "text": md_text
         }
     }
-    requests.post(generate_dingtalk_url(), json=payload, timeout=10)
+
+    try:
+        requests.post(generate_dingtalk_url(), json=payload, timeout=10)
+        logging.info("✅ 钉钉推送成功！")
+    except Exception as e:
+        logging.error(f"❌ 钉钉请求失败: {e}")
 
 
 def push_heartbeat(up_name):
@@ -190,6 +283,8 @@ def main():
         up_name = "目标UP主"
     else:
         max_id = max(int(item['id_str']) for item in initial_items)
+        # 指定id用于测试
+        max_id = 1180348719119204375
         up_name = initial_items[0].get('modules', {}).get('module_author', {}).get('name', '该UP主')
         logging.info(f"✅ 正在监控[{up_name}]，最新动态 ID: {max_id}")
 
@@ -213,12 +308,22 @@ def main():
         for item in items:
             dyn_id = int(item['id_str'])
             if dyn_id > max_id:
-                formatted_json = json.dumps(item, ensure_ascii=False, indent=2)
-                logging.info(f"🐛 发现新动态 (ID: {dyn_id}) \n{formatted_json}")
+                # ================= 🌟 核心修改 =================
+                logging.info(f"🐛 发现新动态 (ID: {dyn_id})，正在获取无损详情...")
 
-                parsed = parse_item(item)
+                # 1. 专门去请求一次完整详情，防止列表数据被阉割
+                detail_item = fetch_dynamic_detail(dyn_id)
+                # 2. 如果详情获取成功就用详情，否则用原来的 item 兜底
+                target_item = detail_item if detail_item else item
+
+                # 你可以把最终解析前的数据打印出来看看是不是有字了
+                formatted_json = json.dumps(target_item, ensure_ascii=False, indent=2)
+                logging.info(f"原始数据: {formatted_json}")
+
+                parsed = parse_item(target_item)
                 if parsed:
                     new_dynamics.append(parsed)
+                # ===============================================
 
         if new_dynamics:
             new_dynamics.sort(key=lambda x: x['id'])
