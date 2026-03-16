@@ -256,7 +256,7 @@ def main():
     else:
         max_id = max(int(item['id_str']) for item in initial_items)
         # 指定id用于测试
-        max_id = 1180348719119204375
+        # max_id = 1180348719119204375
         up_name = initial_items[0].get('modules', {}).get('module_author', {}).get('name', '该UP主')
         logging.info(f"✅ 正在监控[{up_name}]，最新动态 ID: {max_id}")
 
