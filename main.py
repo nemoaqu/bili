@@ -286,8 +286,8 @@ def main():
                 target_item = detail_item if detail_item else item
 
                 # 你可以把最终解析前的数据打印出来看看是不是有字了
-                # formatted_json = json.dumps(target_item, ensure_ascii=False, indent=2)
-                # logging.info(f"原始数据: {formatted_json}")
+                formatted_json = json.dumps(target_item, ensure_ascii=False, indent=2)
+                logging.info(f"原始数据: {formatted_json}")
 
                 parsed = parse_item(target_item)
                 if parsed:
