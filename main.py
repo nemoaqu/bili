@@ -9,6 +9,7 @@ import logging
 import sys
 import traceback
 from datetime import datetime
+from functools import reduce
 
 # ================= 配置区域 =================
 UID = "322005137"  # 要监控的 UP主 UID
@@ -62,6 +63,47 @@ def get_headers(url_type="space"):
         headers["Cookie"] = COOKIE
     return headers
 
+# ==========================================
+# 🌟 B站 WBI 签名算法 (解锁 API 隐藏限制的核心)
+# ==========================================
+mixinKeyEncTab =[
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
+    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
+    36, 20, 34, 44, 52
+]
+
+def get_mixin_key(orig: str):
+    """生成 Mixin Key"""
+    return reduce(lambda s, i: s + orig[i], mixinKeyEncTab, '')[:32]
+
+def get_wbi_keys():
+    """从 B 站动态获取当天的 WBI 密钥"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Cookie": COOKIE
+    }
+    resp = requests.get('https://api.bilibili.com/x/web-interface/nav', headers=headers, timeout=10)
+    resp.raise_for_status()
+    json_content = resp.json()
+    img_url = json_content['data']['wbi_img']['img_url']
+    sub_url = json_content['data']['wbi_img']['sub_url']
+    img_key = img_url.rsplit('/', 1)[1].split('.')[0]
+    sub_key = sub_url.rsplit('/', 1)[1].split('.')[0]
+    return img_key, sub_key
+
+def enc_wbi(params: dict, img_key: str, sub_key: str):
+    """对请求参数进行 WBI MD5 签名"""
+    mixin_key = get_mixin_key(img_key + sub_key)
+    curr_time = round(time.time())
+    params['wts'] = curr_time
+    # 按照 key 重排参数
+    params = dict(sorted(params.items()))
+    query = urllib.parse.urlencode(params)
+    wbi_sign = hashlib.md5((query + mixin_key).encode()).hexdigest()
+    params['w_rid'] = wbi_sign
+    return params
+# ==========================================
 
 def fetch_dynamics(uid):
     """请求 B 站列表 API (加上新版 features 参数防止数据降级)"""
@@ -79,15 +121,36 @@ def fetch_dynamics(uid):
         logging.error(f"❌ 列表获取异常: {e}")
     return[]
 
+
 def fetch_dynamic_detail(dyn_id):
-    """单独请求单条动态详情 API (加上新版 features 参数获取完整富文本)"""
-    url = f"https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?id={dyn_id}&{BILI_PARAMS}"
+    """携带 WBI 签名和新版特征请求单条动态，获取无损长文"""
     try:
+        # 1. 获取当天的签名密钥
+        img_key, sub_key = get_wbi_keys()
+
+        # 2. 组装 B 站要求的所有参数
+        params = {
+            "id": str(dyn_id),
+            "timezone_offset": "-480",
+            "platform": "web",
+            "features": "itemOpusStyle,opusBigCover,onlyfansVote,endFooterHidden,decorationCard,onlyfansAssetsV2,ugcDelete,onlyfansQaCard,editable,opusPrivateVisible,avatarAutoTheme,sunflowerStyle,cardsEnhance,eva3CardOpus,eva3CardVideo,eva3CardComment,eva3CardVote,eva3CardUser"
+        }
+
+        # 3. 进行 WBI 签名
+        signed_params = enc_wbi(params, img_key, sub_key)
+        query_string = urllib.parse.urlencode(signed_params)
+
+        # 4. 发起请求
+        url = f"https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?{query_string}"
         response = requests.get(url, headers=get_headers("detail"), timeout=15)
+
         if response.status_code == 200:
             data = response.json()
             if data['code'] == 0:
+                logging.info(f"✅ 成功绕过风控，获取到完整无损的长文详情！")
                 return data.get('data', {}).get('item', {})
+            else:
+                logging.warning(f"⚠️ 详情API返回错误码: {data}")
     except Exception as e:
         logging.error(f"❌ 详情获取异常: {e}")
     return None
