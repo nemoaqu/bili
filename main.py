@@ -10,6 +10,7 @@ import sys
 import traceback
 from datetime import datetime
 from functools import reduce
+from logging.handlers import TimedRotatingFileHandler
 
 # ================= 配置区域 =================
 UID = "322005137"  # 要监控的 UP主 UID
@@ -30,16 +31,34 @@ HEARTBEAT_TIME = "09:00"  # 每天固定发送存活报告的时间
 BILI_PARAMS = "timezone_offset=-480&platform=web&features=itemOpusStyle,opusBigCover,onlyfansVote,endFooterHidden,decorationCard,onlyfansAssetsV2,ugcDelete,onlyfansQaCard,editable,opusPrivateVisible,avatarAutoTheme,sunflowerStyle,cardsEnhance,eva3CardOpus,eva3CardVideo,eva3CardComment,eva3CardVote,eva3CardUser"
 # ============================================
 
+# ============================================
+# 📝 每日自动轮转日志配置
+# ============================================
+# 创建日志格式
+log_formatter = logging.Formatter('[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+# 1. 配置文件输出 (每天午夜自动切割生成新文件)
+file_handler = TimedRotatingFileHandler(
+    filename="bilibili_monitor.log", # 当前正在写入的活动日志
+    when="MIDNIGHT",                 # 每天午夜（0点）进行切割
+    interval=1,                      # 每 1 天切割一次
+    backupCount=30,                  # 保留最近 30 天的历史日志文件，超出的自动删除
+    encoding="utf-8"
+)
+# 切割后历史文件名的后缀格式，比如: bilibili_monitor.log.2026-03-19
+file_handler.suffix = "%Y-%m-%d"
+file_handler.setFormatter(log_formatter)
+
+# 2. 配置控制台黑框输出
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(log_formatter)
+
+# 3. 将这两个处理器应用到全局日志
 logging.basicConfig(
     level=logging.INFO,
-    format='[%(asctime)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[file_handler, console_handler]
 )
-
+# ============================================
 
 def get_time():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
