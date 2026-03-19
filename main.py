@@ -93,17 +93,24 @@ def get_wbi_keys():
     return img_key, sub_key
 
 def enc_wbi(params: dict, img_key: str, sub_key: str):
-    """对请求参数进行 WBI MD5 签名"""
+    """对请求参数进行 WBI MD5 签名 (加入官方特殊字符过滤)"""
     mixin_key = get_mixin_key(img_key + sub_key)
     curr_time = round(time.time())
     params['wts'] = curr_time
-    # 按照 key 重排参数
     params = dict(sorted(params.items()))
-    query = urllib.parse.urlencode(params)
+
+    # 过滤 B 站 WBI 要求的非法字符，防止签名失败
+    filtered_params = {}
+    for k, v in params.items():
+        v = str(v)
+        for char in ["!", "'", "(", ")", "*"]:
+            v = v.replace(char, '')
+        filtered_params[k] = v
+
+    query = urllib.parse.urlencode(filtered_params)
     wbi_sign = hashlib.md5((query + mixin_key).encode()).hexdigest()
-    params['w_rid'] = wbi_sign
-    return params
-# ==========================================
+    filtered_params['w_rid'] = wbi_sign
+    return filtered_params
 
 def fetch_dynamics(uid):
     """请求 B 站列表 API (加上新版 features 参数防止数据降级)"""
@@ -123,34 +130,39 @@ def fetch_dynamics(uid):
 
 
 def fetch_dynamic_detail(dyn_id):
-    """携带 WBI 签名和新版特征请求单条动态，获取无损长文"""
+    """携带全套 PC 端参数请求详情，彻底解决字数截断问题"""
     try:
-        # 1. 获取当天的签名密钥
         img_key, sub_key = get_wbi_keys()
 
-        # 2. 组装 B 站要求的所有参数
+        # ==========================================
+        # 🌟 核心破局点：一字不差地模拟真实浏览器的全套参数
+        # 告诉 B 站服务器：我是纯正的 PC 网页端，不要给我截断数据！
+        # ==========================================
         params = {
             "id": str(dyn_id),
             "timezone_offset": "-480",
             "platform": "web",
+            "gaia_source": "main_web",
+            "web_location": "333.1368",
+            "x-bili-device-req-json": '{"platform":"web","device":"pc","spmid":"333.1368"}',
             "features": "itemOpusStyle,opusBigCover,onlyfansVote,endFooterHidden,decorationCard,onlyfansAssetsV2,ugcDelete,onlyfansQaCard,editable,opusPrivateVisible,avatarAutoTheme,sunflowerStyle,cardsEnhance,eva3CardOpus,eva3CardVideo,eva3CardComment,eva3CardVote,eva3CardUser"
         }
 
-        # 3. 进行 WBI 签名
+        # 进行合法签名并转为 URL 字符串
         signed_params = enc_wbi(params, img_key, sub_key)
         query_string = urllib.parse.urlencode(signed_params)
 
-        # 4. 发起请求
         url = f"https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?{query_string}"
+
         response = requests.get(url, headers=get_headers("detail"), timeout=15)
 
         if response.status_code == 200:
             data = response.json()
             if data['code'] == 0:
-                logging.info(f"✅ 成功绕过风控，获取到完整无损的长文详情！")
+                logging.info(f"✅ 成功获取完整详情！(已带 PC 端设备标识)")
                 return data.get('data', {}).get('item', {})
             else:
-                logging.warning(f"⚠️ 详情API返回错误码: {data}")
+                logging.warning(f"⚠️ 详情API返回错误: {data}")
     except Exception as e:
         logging.error(f"❌ 详情获取异常: {e}")
     return None
