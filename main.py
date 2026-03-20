@@ -227,10 +227,9 @@ def parse_item(item):
 
         # 2. 提取常规文本
         desc_text = extract_text_from_node(desc)
-        if desc_text:
-            text_parts.append(desc_text)
 
         # 3. 提取富媒体内容
+        major_text = ""
         if isinstance(major, dict):
             major_type = major.get('type')
 
@@ -240,9 +239,7 @@ def parse_item(item):
                     text_parts.append(f"【{opus['title']}】")
 
                 summary = opus.get('summary', {})
-                summary_text = extract_text_from_node(summary)
-                if summary_text and summary_text not in " ".join(text_parts):
-                    text_parts.append(summary_text)
+                major_text = extract_text_from_node(summary)
 
                 pics = opus.get('pics', [])
                 for pic in pics:
@@ -264,8 +261,46 @@ def parse_item(item):
             elif major_type == 'MAJOR_TYPE_LIVE_RCMD':
                 text_parts.append("【正在直播推送】")
 
+        # 智能合并 desc_text 和 major_text，避免截断或重复
+        if desc_text and major_text:
+            if desc_text in major_text:
+                text_parts.append(major_text)
+            elif major_text in desc_text:
+                text_parts.append(desc_text)
+            else:
+                text_parts.append(desc_text)
+                text_parts.append(major_text)
+        elif desc_text:
+            text_parts.append(desc_text)
+        elif major_text:
+            text_parts.append(major_text)
+
         if item.get('orig') or item.get('type') == 'DYNAMIC_TYPE_FORWARD':
-            text_parts.append("//【转发了他人动态】")
+            orig = item.get('orig', {})
+            orig_author = orig.get('modules', {}).get('module_author', {}).get('name', 'Unknown')
+            
+            # 提取被转发的原文
+            orig_dynamic = orig.get('modules', {}).get('module_dynamic', {})
+            orig_desc = extract_text_from_node(orig_dynamic.get('desc'))
+            orig_major_text = ""
+            if isinstance(orig_dynamic.get('major'), dict) and orig_dynamic['major'].get('type') == 'MAJOR_TYPE_OPUS':
+                orig_major_text = extract_text_from_node(orig_dynamic['major'].get('opus', {}).get('summary'))
+            
+            orig_text = ""
+            if orig_desc and orig_major_text:
+                if orig_desc in orig_major_text:
+                    orig_text = orig_major_text
+                elif orig_major_text in orig_desc:
+                    orig_text = orig_desc
+                else:
+                    orig_text = f"{orig_desc}\n\n{orig_major_text}"
+            else:
+                orig_text = orig_desc or orig_major_text
+            
+            forward_str = f"//【转发了 @{orig_author} 的动态】"
+            if orig_text:
+                forward_str += f"\n{orig_text}"
+            text_parts.append(forward_str)
 
         text = "\n\n".join(text_parts).strip()
         if not text:
